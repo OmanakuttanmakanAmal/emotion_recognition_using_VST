@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import numpy as np
 import matplotlib
@@ -133,27 +134,54 @@ def save_dataset_bar(path):
     plt.close(fig)
 
 
+CHECKPOINT_DIR = ROOT / "checkpoints"
+
+
+def load_real_history(model_key):
+    """Load per-epoch history logged by train.py/train_audio.py/train_multimodal.py.
+
+    Returns (epochs, loss, acc) using validation metrics, or None if no real
+    results_<model_key>.json exists yet. We never fall back to fabricated
+    numbers here -- a missing log means the chart is skipped, not faked.
+    """
+    path = CHECKPOINT_DIR / f"results_{model_key}.json"
+    if not path.exists():
+        print(f"[SKIP] {path} not found -- run training first to log real history.")
+        return None
+
+    with open(path, "r", encoding="utf-8") as fp:
+        results = json.load(fp)
+    history = results.get("history")
+    if not history or not history.get("val_acc"):
+        print(f"[SKIP] {path} has no per-epoch history.")
+        return None
+
+    n = len(history["val_acc"])
+    epochs = np.arange(1, n + 1)
+    return epochs, history["val_loss"], history["val_acc"]
+
+
 def main():
-    epochs = np.arange(1, 21)
-
-    face_loss = [1.95, 1.74, 1.56, 1.38, 1.26, 1.16, 1.06, 0.96, 0.88, 0.82,
-                 0.77, 0.72, 0.68, 0.63, 0.59, 0.55, 0.51, 0.47, 0.43, 0.40]
-    face_acc = np.linspace(0.20, 0.8067, 20)
-
-    audio_loss = [2.10, 1.92, 1.78, 1.63, 1.50, 1.38, 1.28, 1.19, 1.11, 1.03,
-                  0.97, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72, 0.69, 0.66, 0.63]
-    audio_acc = np.linspace(0.15, 0.431, 20)
-
-    fusion_loss = [1.40, 1.24, 1.08, 0.92, 0.80, 0.69, 0.60, 0.52, 0.44, 0.37,
-                   0.31, 0.26, 0.22, 0.19, 0.16, 0.14, 0.12, 0.11, 0.10, 0.09]
-    fusion_acc = np.linspace(0.45, 0.9565, 20)
-
-    save_dual_axis_plot(OUT_DIR / "face_training_curve.png", "Phase 1 Face Model Training Trend", epochs, face_loss, face_acc)
-    save_dual_axis_plot(OUT_DIR / "audio_training_curve.png", "Phase 2 Audio Model Training Trend", epochs, audio_loss, audio_acc)
-    save_dual_axis_plot(OUT_DIR / "fusion_training_curve.png", "Phase 3 Fusion Model Training Trend", epochs, fusion_loss, fusion_acc)
+    curves = {
+        "dino":   ("face_training_curve.png",   "Phase 1 Face Model Training Trend"),
+        "audio":  ("audio_training_curve.png",  "Phase 2 Audio Model Training Trend"),
+        "fusion": ("fusion_training_curve.png", "Phase 3 Fusion Model Training Trend"),
+    }
+    final_accs = {}
+    for model_key, (fname, title) in curves.items():
+        data = load_real_history(model_key)
+        if data is None:
+            continue
+        epochs, loss, acc = data
+        save_dual_axis_plot(OUT_DIR / fname, title, epochs, loss, acc,
+                             loss_label="Val Loss", acc_label="Val Accuracy")
+        final_accs[model_key] = acc[-1] * 100
 
     labels = ["Face (DINO)", "Audio (Wav2Vec2)", "Fusion (MLP)"]
-    accuracies = [80.67, 43.1, 95.65]
+    # Prefer real final accuracies from the JSON logs; only fall back to the
+    # last known reported numbers for models that haven't been retrained yet.
+    fallback = {"dino": 80.67, "audio": 43.1, "fusion": 95.65}
+    accuracies = [final_accs.get(k, fallback[k]) for k in ("dino", "audio", "fusion")]
     save_plot(
         OUT_DIR / "accuracy_comparison.png",
         "Model Accuracy Comparison",
@@ -253,9 +281,20 @@ def main():
         ],
     )
 
-    print(f"Saved charts to {OUT_DIR}")
+    print(f"\nSaved charts to {OUT_DIR}")
     for path in sorted(OUT_DIR.glob("*.png")):
         print(path.name)
+
+    stale = [curves[k][0] for k in curves if k not in final_accs]
+    if stale:
+        print(
+            "\nWARNING: no results_<model>.json found for: "
+            + ", ".join(k for k in curves if k not in final_accs)
+            + f"\n  -> {', '.join(stale)} in {OUT_DIR} are OLD/fabricated files left over "
+              "from a previous run and were NOT regenerated.\n"
+              "  Retrain with train.py / train_audio.py / train_multimodal.py (they already "
+              "save checkpoints/results_<model>.json), then re-run this script."
+        )
 
 
 if __name__ == "__main__":
